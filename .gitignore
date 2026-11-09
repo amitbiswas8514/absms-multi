@@ -11,3 +11,7 @@ local.properties
 server/smsmulti/devices.json
 server/smsmulti/sms.json
 server/smsmulti/*.bak
+.env
+server/smsmulti/.env
+server/smsmulti/*.sqlite
+server/smsmulti/*.sqlite-*

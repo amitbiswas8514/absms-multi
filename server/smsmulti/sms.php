@@ -1,91 +1,48 @@
 <?php
-header("Content-Type: application/json");
+require_once __DIR__.'/common.php';
 
-$file = "sms.json";
-if (!file_exists($file)) {
-    file_put_contents($file, "[]");
-}
+$device = gateway_require_device();
+$pdo = gateway_db();
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
-$data = json_decode(file_get_contents($file), true);
-
-$sms    = $_GET['sms']    ?? "";
-$action = $_GET['action'] ?? "";
-$id     = intval($_GET['id'] ?? 0);
-$device = $_GET['device'] ?? "unknown";
-
-$now = time();
-$LOCK_TIMEOUT = 30; // seconds
-
-// ------------------------------------------------------
-// 1️⃣ FETCH & LOCK ONE UNSENT SMS (ATOMIC)
-// ------------------------------------------------------
-if ($sms === "unsent") {
-
-    foreach ($data as &$row) {
-
-        // Release stale locks
-        if ($row['status'] === "processing" &&
-            ($now - ($row['locked_at'] ?? 0)) > $LOCK_TIMEOUT) {
-
-            $row['status'] = "unsent";
-            $row['locked_by'] = "";
-            $row['locked_at'] = 0;
+if ($method === 'GET' && ($_GET['sms'] ?? '') === 'unsent') {
+    $now = time();
+    try {
+        $pdo->exec('BEGIN IMMEDIATE TRANSACTION');
+        $select = $pdo->prepare("SELECT id, phone, message FROM sms
+            WHERE target_device_id = ? AND (status = 'unsent' OR (status = 'processing' AND locked_at < ?))
+            ORDER BY id LIMIT 1");
+        $select->execute([$device['id'], $now - 60]);
+        $row = $select->fetch();
+        if (! $row) {
+            $pdo->exec('COMMIT');
+            gateway_json([]);
         }
-
-        if ($row['status'] === "unsent") {
-
-            // LOCK IT
-            $row['status'] = "processing";
-            $row['locked_by'] = $device;
-            $row['locked_at'] = $now;
-
-            file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
-
-            echo json_encode([$row]);
-            exit;
-        }
+        $claim = $pdo->prepare("UPDATE sms SET status = 'processing', locked_by = ?, locked_at = ? WHERE id = ?");
+        $claim->execute([$device['device_id'], $now, $row['id']]);
+        $pdo->exec('COMMIT');
+        gateway_json([$row]);
+    } catch (Throwable $error) {
+        try { $pdo->exec('ROLLBACK'); } catch (Throwable) {}
+        error_log('SMS queue claim failed: '.$error::class);
+        gateway_json(['error' => 'Queue temporarily unavailable.'], 503);
     }
-
-    echo json_encode([]);
-    exit;
 }
 
-// ------------------------------------------------------
-// 2️⃣ MARK SENT
-// ------------------------------------------------------
-if ($action === "mark_sent" && $id > 0) {
-
-    foreach ($data as &$row) {
-        if ($row['id'] == $id) {
-            $row['status'] = "sent";
-            $row['locked_by'] = "";
-            $row['locked_at'] = 0;
-        }
+if ($method === 'POST') {
+    $action = (string) ($_POST['action'] ?? '');
+    $id = filter_var($_POST['id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if (! in_array($action, ['mark_sent', 'mark_failed'], true) || $id === false) {
+        gateway_json(['error' => 'Invalid status update.'], 400);
     }
-
-    file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
-    echo json_encode(["success" => true]);
-    exit;
-}
-
-// ------------------------------------------------------
-// 3️⃣ MARK FAILED
-// ------------------------------------------------------
-if ($action === "mark_failed" && $id > 0) {
-
-    foreach ($data as &$row) {
-        if ($row['id'] == $id) {
-            $row['status'] = "failed";
-            $row['locked_by'] = "";
-            $row['locked_at'] = 0;
-        }
+    $status = $action === 'mark_sent' ? 'sent' : 'failed';
+    $update = $pdo->prepare("UPDATE sms SET status = ?, locked_by = NULL, locked_at = NULL
+        WHERE id = ? AND target_device_id = ? AND status = 'processing' AND locked_by = ?");
+    $update->execute([$status, $id, $device['id'], $device['device_id']]);
+    if ($update->rowCount() !== 1) {
+        gateway_json(['error' => 'Message was not claimed by this device.'], 409);
     }
-
-    file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT));
-    echo json_encode(["success" => true]);
-    exit;
+    gateway_json(['success' => true]);
 }
 
-// ------------------------------------------------------
-echo json_encode(["error" => "Invalid request"]);
-exit;
+gateway_json(['error' => 'Method not allowed.'], 405);

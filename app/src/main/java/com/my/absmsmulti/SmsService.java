@@ -1,414 +1,288 @@
 package com.my.absmsmulti;
 
-import android.app.Service;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
-
-import android.content.Intent;
+import android.app.Service;
 import android.content.Context;
-
+import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
-
-import android.os.Handler;
-import android.os.Looper;
-import android.os.PowerManager;
 import android.os.Build;
-
-import android.widget.Toast;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import android.provider.Settings;
-
-
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SmsService extends Service {
-
-	/* ================= CONFIG ================= */
-
-	private static final String DEFAULT_SERVER =
-	"https://azindiaonline.com/proxy/smsmulti/";
-
-	private static final int LOOP_DELAY = 3000;       // 3 sec
-	private static final int HEARTBEAT_DELAY = 10000; // 10 sec
-	private static final int NOTIFY_ID = 1;
-
-	public static final String ACTION_PAUSE  = "PAUSE_SERVICE";
-	public static final String ACTION_RESUME = "RESUME_SERVICE";
-
-	/* ================= CORE ================= */
-
-	private Handler handler;
-	private SmsUtil smsUtil;
-	private PowerManager.WakeLock wakeLock;
-	private NotificationManager notificationManager;
-
-	private boolean isPaused = false;
-	private boolean isForegroundStarted = false;
-
-	private long lastHeartbeat = 0;
-	private String deviceId;
-
-	/* ================= LIFECYCLE ================= */
-
-
-		private String getBaseUrl() {
-
-			String url = getSharedPreferences("gateway_config", MODE_PRIVATE)
-			.getString("server_url", DEFAULT_SERVER);
-
-			if (!url.endsWith("/")) {
-				url += "/";
-			}
-
-			return url;
-		}
-
-		public static void saveServer(Context context, String url) {
-
-			if (url == null || url.trim().isEmpty()) {
-				return;
-			}
-
-			url = url.trim();
-
-			if (!url.endsWith("/")) {
-				url += "/";
-			}
-
-			context.getSharedPreferences("gateway_config", MODE_PRIVATE)
-			.edit()
-			.putString("server_url", url)
-			.apply();
-		}
-
-		public static String getSavedServer(Context context) {
-
-			String url = context.getSharedPreferences("gateway_config", MODE_PRIVATE)
-			.getString("server_url", DEFAULT_SERVER);
-
-			if (!url.endsWith("/")) {
-				url += "/";
-			}
-
-			return url;
-		}
-
-		public static void resetServer(Context context) {
-
-			context.getSharedPreferences("gateway_config", MODE_PRIVATE)
-			.edit()
-			.putString("server_url", DEFAULT_SERVER)
-			.apply();
-		}
-
-
-
-
-
-
-	@Override
-	public void onCreate() {
-		super.onCreate();
-
-		handler = new Handler(Looper.getMainLooper());
-		smsUtil = new SmsUtil();
-
-		notificationManager =
-		(NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-
-		// Sketchware-safe unique device ID
-		deviceId = Settings.Secure.getString(
-		getContentResolver(),
-		Settings.Secure.ANDROID_ID
-		);
-
-		acquireWakeLock();
-		updateNotification("Service started");
-		startLoop();
-
-
-
-
-
-
-
-
-
-
-	}
-
-
-
-
-
-
-	@Override
-	public int onStartCommand(Intent intent, int flags, int startId) {
-
-		if (intent != null && intent.getAction() != null) {
-
-			if (ACTION_PAUSE.equals(intent.getAction())) {
-				isPaused = true;
-				updateNotification("Paused");
-			}
-
-			if (ACTION_RESUME.equals(intent.getAction())) {
-				isPaused = false;
-				updateNotification("Resumed");
-			}
-		}
-		return START_STICKY;
-	}
-
-	@Override
-	public void onDestroy() {
-		if (wakeLock != null && wakeLock.isHeld()) {
-			wakeLock.release();
-		}
-		super.onDestroy();
-	}
-
-	@Override
-	public android.os.IBinder onBind(Intent intent) {
-		return null;
-	}
-
-	/* ================= MAIN LOOP ================= */
-
-	private void startLoop() {
-
-		handler.postDelayed(new Runnable() {
-			@Override
-			public void run() {
-
-				if (isPaused) {
-					updateNotification("Paused");
-				} else if (!isNetworkAvailable()) {
-					updateNotification("No Internet");
-				} else {
-
-					long now = System.currentTimeMillis();
-
-					if (now - lastHeartbeat > HEARTBEAT_DELAY) {
-						sendHeartbeat();
-						lastHeartbeat = now;
-					}
-
-					updateNotification("Checking...");
-					checkForSMS();
-				}
-
-				handler.postDelayed(this, LOOP_DELAY);
-			}
-		}, 2000);
-	}
-
-	/* ================= HEARTBEAT ================= */
-
-	private void sendHeartbeat() {
-
-		new Thread(new Runnable() {
-			@Override
-			public void run() {
-				try {
-					URL url = new URL(
-					getBaseUrl() + "device.php?action=ping&device=" + deviceId
-					);
-					HttpURLConnection c =
-					(HttpURLConnection) url.openConnection();
-					c.setConnectTimeout(5000);
-					c.setReadTimeout(5000);
-					c.getInputStream().close();
-				} catch (Exception ignored) {}
-			}
-		}).start();
-	}
-
-	/* ================= FETCH & SEND SMS ================= */
-
-	private void checkForSMS() {
-
-		new Thread(new Runnable() {
-			@Override
-			public void run() {
-
-				try {
-
-					URL url = new URL(
-					getBaseUrl() + "sms.php?sms=unsent&device=" + deviceId
-					);
-
-					HttpURLConnection conn =
-					(HttpURLConnection) url.openConnection();
-					conn.setConnectTimeout(10000);
-					conn.setReadTimeout(10000);
-
-					BufferedReader br = new BufferedReader(
-					new InputStreamReader(conn.getInputStream())
-					);
-
-					StringBuilder result = new StringBuilder();
-					String line;
-					while ((line = br.readLine()) != null) {
-						result.append(line);
-					}
-
-					JSONArray arr = new JSONArray(result.toString());
-
-					if (arr.length() == 0) {
-						updateNotification("Queue empty");
-						return;
-					}
-
-					JSONObject sms = arr.getJSONObject(0);
-
-					int id = sms.getInt("id");
-					String phone = sms.getString("phone");
-					String message = sms.getString("message");
-
-					updateNotification("Sending to " + phone);
-
-					boolean sent = smsUtil.sendSMS(phone, message);
-
-					updateStatus(id, sent ? "mark_sent" : "mark_failed");
-
-				} catch (Exception e) {
-					updateNotification("Server error");
-				}
-			}
-		}).start();
-	}
-
-	/* ================= UPDATE SERVER ================= */
-
-	private void updateStatus(int id, String action) {
-
-		try {
-			URL url = new URL(
-			getBaseUrl() + "sms.php?action=" + action + "&id=" + id
-			);
-			HttpURLConnection conn =
-			(HttpURLConnection) url.openConnection();
-			conn.getInputStream().close();
-		} catch (Exception ignored) {}
-	}
-
-	/* ================= NETWORK ================= */
-
-	private boolean isNetworkAvailable() {
-
-		ConnectivityManager cm =
-		(ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-
-		NetworkInfo info = cm.getActiveNetworkInfo();
-		return info != null && info.isConnected();
-	}
-
-	/* ================= WAKELOCK ================= */
-
-	private void acquireWakeLock() {
-
-		PowerManager pm =
-		(PowerManager) getSystemService(POWER_SERVICE);
-
-		wakeLock = pm.newWakeLock(
-		PowerManager.PARTIAL_WAKE_LOCK,
-		"ABSMS::WAKELOCK"
-		);
-		wakeLock.acquire();
-	}
-
-	/* ================= NOTIFICATION ================= */
-
-	private void updateNotification(final String text) {
-
-		handler.post(new Runnable() {
-			@Override
-			public void run() {
-
-				String CHANNEL = "sms_gateway";
-
-				if (Build.VERSION.SDK_INT >= 26) {
-					NotificationChannel ch =
-					new NotificationChannel(
-					CHANNEL,
-					"SMS Gateway",
-					NotificationManager.IMPORTANCE_LOW
-					);
-					notificationManager.createNotificationChannel(ch);
-				}
-
-				Intent actionIntent =
-				new Intent(SmsService.this, SmsService.class);
-				actionIntent.setAction(
-				isPaused ? ACTION_RESUME : ACTION_PAUSE
-				);
-
-				PendingIntent pi =
-				PendingIntent.getService(
-				SmsService.this,
-				0,
-				actionIntent,
-				PendingIntent.FLAG_UPDATE_CURRENT |
-				PendingIntent.FLAG_IMMUTABLE
-				);
-
-				Notification.Builder builder =
-				Build.VERSION.SDK_INT >= 26
-				? new Notification.Builder(
-				SmsService.this, CHANNEL
-				)
-				: new Notification.Builder(SmsService.this);
-
-				builder.setContentTitle("SMS Gateway Running")
-				.setContentText(text)
-				.setSmallIcon(
-				android.R.drawable.ic_dialog_email
-				)
-				.setOnlyAlertOnce(true)
-				.addAction(
-				isPaused
-				? android.R.drawable.ic_media_play
-				: android.R.drawable.ic_media_pause,
-				isPaused ? "Resume" : "Pause",
-				pi
-				);
-
-				Notification notification = builder.build();
-
-				if (!isForegroundStarted) {
-					startForeground(NOTIFY_ID, notification);
-					isForegroundStarted = true;
-				} else {
-					notificationManager.notify(
-					NOTIFY_ID, notification
-					);
-				}
-			}
-		});
-	}
-
-	/* ================= TOAST (OPTIONAL) ================= */
-
-	private void show(final String msg) {
-		handler.post(new Runnable() {
-			@Override
-			public void run() {
-				Toast.makeText(
-				getApplicationContext(),
-				msg,
-				Toast.LENGTH_SHORT
-				).show();
-			}
-		});
-	}
+    private static final String PREFS = "gateway_config";
+    private static final String DEFAULT_SERVER = "";
+    private static final String CHANNEL_ID = "sms_gateway";
+    private static final int LOOP_DELAY_MS = 5000;
+    private static final int HEARTBEAT_DELAY_MS = 15000;
+    private static final int NOTIFICATION_ID = 1;
+
+    public static final String ACTION_PAUSE = "com.my.absmsmulti.PAUSE_SERVICE";
+    public static final String ACTION_RESUME = "com.my.absmsmulti.RESUME_SERVICE";
+
+    private final AtomicBoolean requestInFlight = new AtomicBoolean(false);
+    private Handler handler;
+    private SmsUtil smsUtil;
+    private NotificationManager notificationManager;
+    private boolean paused;
+    private boolean foregroundStarted;
+    private long lastHeartbeat;
+    private String deviceId;
+
+    public static boolean isEnabled(Context context) {
+        return context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("service_enabled", false);
+    }
+
+    public static void setEnabled(Context context, boolean enabled) {
+        context.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("service_enabled", enabled).apply();
+    }
+
+    public static String getSavedServer(Context context) {
+        String server = context.getSharedPreferences(PREFS, MODE_PRIVATE).getString("server_url", DEFAULT_SERVER);
+        server = server == null ? "" : server.trim();
+        return server.isEmpty() || server.endsWith("/") ? server : server + "/";
+    }
+
+    public static String getSavedToken(Context context) {
+        String token = context.getSharedPreferences(PREFS, MODE_PRIVATE).getString("device_token", "");
+        return token == null ? "" : token;
+    }
+
+    public static void saveServer(Context context, String server, String token) {
+        String normalized = server.trim();
+        if (!normalized.endsWith("/")) normalized += "/";
+        context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("server_url", normalized)
+                .putString("device_token", token.trim().toLowerCase())
+                .apply();
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        handler = new Handler(Looper.getMainLooper());
+        smsUtil = new SmsUtil();
+        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        deviceId = getOrCreateDeviceId(this);
+        updateNotification("Waiting for the SMS server");
+        scheduleLoop();
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!isEnabled(this) || getSavedServer(this).isEmpty() || getSavedToken(this).isEmpty()) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (intent != null && ACTION_PAUSE.equals(intent.getAction())) {
+            paused = true;
+            updateNotification("Paused");
+        } else if (intent != null && ACTION_RESUME.equals(intent.getAction())) {
+            paused = false;
+            updateNotification("Resumed");
+            scheduleLoop();
+        }
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        if (handler != null) handler.removeCallbacksAndMessages(null);
+        if (notificationManager != null) notificationManager.cancel(NOTIFICATION_ID);
+        if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
+        else stopForeground(true);
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private void scheduleLoop() {
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!isEnabled(SmsService.this)) {
+                    stopSelf();
+                    return;
+                }
+                if (paused) {
+                    updateNotification("Paused");
+                } else if (!isNetworkAvailable()) {
+                    updateNotification("No internet connection");
+                } else {
+                    long now = System.currentTimeMillis();
+                    if (now - lastHeartbeat >= HEARTBEAT_DELAY_MS) {
+                        sendHeartbeat();
+                        lastHeartbeat = now;
+                    }
+                    fetchAndSendOneMessage();
+                }
+                if (!paused && isEnabled(SmsService.this)) handler.postDelayed(this, LOOP_DELAY_MS);
+            }
+        }, 2000);
+    }
+
+    private HttpURLConnection openConnection(String path) throws Exception {
+        String base = getSavedServer(this);
+        if (!base.startsWith("https://")) throw new IllegalStateException("An HTTPS server URL is required.");
+        HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(12000);
+        connection.setUseCaches(false);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Authorization", "Bearer " + getSavedToken(this));
+        connection.setRequestProperty("X-Device-ID", deviceId);
+        return connection;
+    }
+
+    private static String getOrCreateDeviceId(Context context) {
+        android.content.SharedPreferences preferences = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+        String id = preferences.getString("device_id", "");
+        if (id == null || id.isEmpty()) {
+            id = UUID.randomUUID().toString().replace("-", "");
+            preferences.edit().putString("device_id", id).apply();
+        }
+        return id;
+    }
+
+    private void sendHeartbeat() {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = openConnection("device.php");
+                connection.setRequestMethod("POST");
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write("action=ping".getBytes(StandardCharsets.UTF_8));
+                }
+                if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                    updateNotification("Server authorization failed");
+                }
+            } catch (Exception ignored) {
+                updateNotification("SMS server unavailable");
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "absms-heartbeat").start();
+    }
+
+    private void fetchAndSendOneMessage() {
+        if (!requestInFlight.compareAndSet(false, true)) return;
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = openConnection("sms.php?sms=unsent");
+                if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                    updateNotification("Server authorization failed");
+                    return;
+                }
+                JSONArray messages = new JSONArray(readResponse(connection.getInputStream()));
+                if (messages.length() == 0) {
+                    updateNotification("Queue empty");
+                    return;
+                }
+                JSONObject message = messages.getJSONObject(0);
+                int id = message.getInt("id");
+                String phone = message.getString("phone");
+                String body = message.getString("message");
+                updateNotification("Sending a queued message");
+                boolean accepted = smsUtil.sendSMS(phone, body);
+                updateStatus(id, accepted ? "mark_sent" : "mark_failed");
+                updateNotification(accepted ? "Queued message submitted" : "Message could not be submitted");
+            } catch (Exception ignored) {
+                updateNotification("SMS server unavailable");
+            } finally {
+                if (connection != null) connection.disconnect();
+                requestInFlight.set(false);
+            }
+        }, "absms-queue").start();
+    }
+
+    private String readResponse(InputStream input) throws Exception {
+        StringBuilder result = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) result.append(line);
+        }
+        return result.toString();
+    }
+
+    private void updateStatus(int id, String action) {
+        HttpURLConnection connection = null;
+        try {
+            connection = openConnection("sms.php");
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            byte[] body = ("action=" + action + "&id=" + id).getBytes(StandardCharsets.UTF_8);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                updateNotification("Message status was not accepted by the server");
+            }
+        } catch (Exception ignored) {
+            updateNotification("Message status could not be saved");
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private boolean isNetworkAvailable() {
+        ConnectivityManager manager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (manager == null) return false;
+        NetworkInfo info = manager.getActiveNetworkInfo();
+        return info != null && info.isConnected();
+    }
+
+    private void updateNotification(String text) {
+        if (handler == null) return;
+        handler.post(() -> {
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "SMS Gateway", NotificationManager.IMPORTANCE_LOW);
+                notificationManager.createNotificationChannel(channel);
+            }
+            Intent actionIntent = new Intent(this, SmsService.class);
+            actionIntent.setAction(paused ? ACTION_RESUME : ACTION_PAUSE);
+            PendingIntent pendingIntent = PendingIntent.getService(
+                    this, 0, actionIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, CHANNEL_ID)
+                    : new Notification.Builder(this);
+            Notification notification = builder.setContentTitle("SMS Gateway")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_dialog_email)
+                    .setOnlyAlertOnce(true)
+                    .addAction(paused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause,
+                            paused ? "Resume" : "Pause", pendingIntent)
+                    .build();
+            if (!foregroundStarted) {
+                startForeground(NOTIFICATION_ID, notification);
+                foregroundStarted = true;
+            } else {
+                notificationManager.notify(NOTIFICATION_ID, notification);
+            }
+        });
+    }
 }
