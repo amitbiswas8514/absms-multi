@@ -12,14 +12,15 @@ An Android app and PHP backend for queue based SMS sending. The Android foregrou
 - `docs/SECURITY.md` — implemented protections and remaining security limits.
 - `docs/DEPLOYMENT.md` — server setup, device pairing, and data migration notes.
 
-## Requirements
+## Installation
 
-- Android Studio with Android Gradle Plugin 8.7.0 support.
-- JDK 17.
-- Android SDK platform 34 and a device with a SIM for SMS testing.
-- PHP 8.1 or newer with PDO SQLite enabled.
+Install the PHP backend over HTTPS first, then build and pair the Android app. The full [installation and deployment guide](docs/DEPLOYMENT.md) includes server requirements, PHP-FPM configuration, Android build commands, device pairing, and troubleshooting.
 
-The ZIP did not include a Gradle wrapper. Open the project root in Android Studio, allow Gradle sync, then build the `app` module. Use a test device and test number you control.
+Quick requirements:
+
+- Backend: PHP 8.1+ with PDO SQLite and sessions enabled; HTTPS; SQLite storage outside the public web root.
+- Android build: Android Studio, JDK 17, Android SDK Platform 34, and Gradle 8.9. This repository does not include a Gradle wrapper; see the guide for creating one locally.
+- SMS testing: a physical Android phone with a SIM and a test number you control.
 
 ## Configure the server
 
