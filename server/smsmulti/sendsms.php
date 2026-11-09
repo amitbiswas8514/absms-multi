@@ -1,143 +1,46 @@
 <?php
-/* =========================================================
-   SEND SMS API
-   - POST  → JSON API (queue SMS)
-   - GET ?view=form → HTML form
-========================================================= */
+require_once __DIR__.'/common.php';
+gateway_require_admin();
+$pdo = gateway_db();
+$error = '';
+$success = '';
 
-$file = "sms.json";
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    gateway_verify_csrf();
+    $deviceId = filter_var($_POST['device_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    $phone = trim((string) ($_POST['phone'] ?? ''));
+    $message = trim((string) ($_POST['message'] ?? ''));
+    $deviceQuery = $pdo->prepare('SELECT id FROM devices WHERE id = ? AND active = 1');
+    $deviceQuery->execute([$deviceId]);
 
-/* ---------- INIT ---------- */
-if (!file_exists($file)) {
-    file_put_contents($file, "[]");
+    if ($deviceId === false || ! $deviceQuery->fetch()) {
+        $error = 'Choose an active registered device.';
+    } elseif (! preg_match('/^\+?[1-9][0-9]{6,14}$/', $phone)) {
+        $error = 'Enter a valid international phone number.';
+    } elseif ($message === '' || gateway_utf8_length($message) > 1600) {
+        $error = 'Enter a message of at most 1,600 characters.';
+    } else {
+        $insert = $pdo->prepare("INSERT INTO sms (target_device_id, phone, message, status, created_at) VALUES (?, ?, ?, 'unsent', ?)");
+        $insert->execute([$deviceId, $phone, $message, time()]);
+        $success = 'SMS added to the selected device queue.';
+    }
 }
 
-/* =========================================================
-   POST → ADD SMS TO QUEUE (API)
-========================================================= */
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    header("Content-Type: application/json");
-
-    $data = json_decode(file_get_contents($file), true);
-
-    $phone   = trim($_POST['phone'] ?? "");
-    $message = trim($_POST['message'] ?? "");
-
-    if ($phone === "" || $message === "") {
-        echo json_encode([
-            "success" => false,
-            "error"   => "Phone or message empty"
-        ]);
-        exit;
-    }
-
-    /* ---------- SAFE ID GENERATION ---------- */
-    $maxId = 0;
-    foreach ($data as $row) {
-        if ($row['id'] > $maxId) {
-            $maxId = $row['id'];
-        }
-    }
-    $newId = $maxId + 1;
-
-    /* ---------- NEW SMS OBJECT ---------- */
-    $newSMS = [
-        "id"        => $newId,
-        "phone"     => $phone,
-        "message"   => $message,
-        "status"    => "unsent",
-        "locked_by" => "",
-        "locked_at" => 0,
-        "created_at"=> date("Y-m-d H:i:s")
-    ];
-
-    $data[] = $newSMS;
-
-    file_put_contents(
-        $file,
-        json_encode($data, JSON_PRETTY_PRINT),
-        LOCK_EX
-    );
-
-    echo json_encode([
-        "success" => true,
-        "message" => "SMS added to queue",
-        "sms"     => $newSMS
-    ]);
-    exit;
-}
-
-/* =========================================================
-   BROWSER FORM (ONLY IF ?view=form)
-========================================================= */
-if (isset($_GET['view']) && $_GET['view'] === 'form') {
+$devices = $pdo->query('SELECT id, label, device_id FROM devices WHERE active = 1 ORDER BY label')->fetchAll();
 ?>
-<!DOCTYPE html>
-<html>
-<head>
-<title>Send SMS</title>
-<style>
-body {
-    font-family: Arial;
-    background: #f5f5f5;
-    padding: 20px;
-}
-.box {
-    background: #fff;
-    max-width: 420px;
-    margin: auto;
-    padding: 20px;
-    border-radius: 10px;
-    box-shadow: 0 0 10px #ccc;
-}
-input, textarea {
-    width: 100%;
-    padding: 10px;
-    margin-top: 10px;
-    border-radius: 5px;
-    border: 1px solid #bbb;
-}
-button {
-    width: 100%;
-    padding: 12px;
-    background: #007bff;
-    border: none;
-    color: white;
-    font-size: 16px;
-    border-radius: 5px;
-    margin-top: 15px;
-    cursor: pointer;
-}
-</style>
-</head>
-<body>
-
-<div class="box">
-    <h2>📩 Add SMS to Queue</h2>
-    <form method="POST">
-        <label>Phone Number</label>
-        <input type="text" name="phone" placeholder="+91XXXXXXXXXX" required>
-
-        <label>Message</label>
-        <textarea name="message" rows="5" required></textarea>
-
-        <button type="submit">➕ Add SMS</button>
-    </form>
-</div>
-
-</body>
-</html>
-<?php
-exit;
-}
-
-/* =========================================================
-   DEFAULT FALLBACK
-========================================================= */
-header("Content-Type: application/json");
-echo json_encode([
-    "success" => false,
-    "error"   => "Invalid request"
-]);
-exit;
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Queue SMS</title>
+<style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:3rem auto;padding:0 1rem;color:#172033}label{display:block;margin-top:1rem}input,textarea,select{box-sizing:border-box;width:100%;padding:.7rem;border:1px solid #9aa5b5;border-radius:.4rem;font:inherit}button{margin-top:1rem;padding:.7rem 1rem}nav{display:flex;gap:1rem}.error{color:#9b1c1c}.success{color:#12633b}</style></head>
+<body><nav><a href="monitor.php">Device monitor</a><a href="devices.php">Devices</a><form method="post" action="logout.php"><input type="hidden" name="_csrf" value="<?= gateway_escape(gateway_csrf_token()) ?>"><button type="submit">Sign out</button></form></nav>
+<h1>Queue an SMS</h1>
+<?php if ($error !== ''): ?><p class="error" role="alert"><?= gateway_escape($error) ?></p><?php endif ?>
+<?php if ($success !== ''): ?><p class="success" role="status"><?= gateway_escape($success) ?></p><?php endif ?>
+<?php if ($devices === []): ?><p>Register a device before queuing a message.</p><?php else: ?>
+<form method="post" action="sendsms.php">
+<input type="hidden" name="_csrf" value="<?= gateway_escape(gateway_csrf_token()) ?>">
+<label for="device">Device</label><select id="device" name="device_id" required><?php foreach ($devices as $device): ?><option value="<?= (int) $device['id'] ?>"><?= gateway_escape($device['label'].($device['device_id'] ? ' — '.substr($device['device_id'], 0, 8) : ' — not paired yet')) ?></option><?php endforeach ?></select>
+<label for="phone">Phone number</label><input id="phone" name="phone" type="tel" autocomplete="tel" placeholder="+14155552671" pattern="\+?[1-9][0-9]{6,14}" maxlength="16" required>
+<label for="message">Message</label><textarea id="message" name="message" rows="5" maxlength="1600" required></textarea>
+<button type="submit">Add to queue</button></form><?php endif ?>
+</body></html>

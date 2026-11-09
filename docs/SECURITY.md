@@ -1,28 +1,25 @@
 # Security and privacy review
 
-This review is based on a static inspection of the supplied ZIP. The app and backend should be treated as a prototype. Do not expose the PHP backend publicly or use it for real customer messages until the blockers below are resolved.
+This review describes the controls added to the repository and remaining limits. It is based on static inspection; it is not a penetration test or production security certification.
 
-## Deployment blockers
+## Controls now in place
 
-1. **Unauthenticated SMS control.** `sendsms.php` accepts queue submissions without authentication. `sms.php` allows clients to fetch messages and change their status without credentials. Anyone who can reach the server may enqueue arbitrary messages or interfere with queue state. Add authenticated, per-device authorization and restrict administrative queue operations.
-2. **No request integrity or abuse controls.** The queue form has no CSRF protection; endpoints lack rate limits and meaningful validation for phone numbers and message length. Add CSRF protections for browser forms, strict input validation, rate limits, and audit logging.
-3. **Sensitive plaintext storage.** The PHP backend stores phone numbers and message bodies in JSON files. These may include OTPs. Keep the files outside the web root, deny direct downloads, set restrictive file permissions, and define retention/deletion rules. Prefer a transactional database for queue state.
-4. **Unsafe monitor rendering.** `monitor.php` inserts `device_id` and status data into `innerHTML`. Render untrusted values with `textContent` and validate status values to prevent script injection.
-5. **TLS trust disabled in the helper client.** `RequestNetworkController` accepts every server certificate and hostname. Remove the custom trust-all manager and hostname verifier; use Android's normal certificate validation. The active polling service uses `HttpURLConnection`, but the unsafe helper remains in the source.
-6. **HTTP server URLs are accepted.** The app allows an operator to save an `http://` URL, and the manifest enables cleartext traffic. Require HTTPS and disable cleartext traffic before release.
-7. **Automatic SMS sending.** The foreground service sends any returned queue item through the SIM without per-message confirmation. Require an explicit, informed opt-in, show recipients and content to the device owner where appropriate, and provide a clear stop control.
+- Each Android installation uses a random 256-bit bearer token created by an authenticated admin. The server stores only a SHA-256 token hash, binds the token to the first device ID that uses it, scopes SMS queue reads to that device, and supports token revocation.
+- Admin pages use a password hash configured outside the repository, strict secure session cookies, CSRF tokens for writes, prepared SQL statements, and login throttling.
+- Queue/device state uses SQLite transactions instead of mutable JSON files. The configured database path must be absolute and outside the web document root; its directory/file permissions are restricted.
+- The Android app accepts HTTPS URLs only, sends the token in an Authorization header, disables cleartext traffic and backups, and relies on the default TLS certificate and hostname checks.
+- The notification no longer displays recipient phone numbers or message text. The service starts only after a user action, an explicit opt-in prompt, and runtime permission checks; it can be stopped from the app and does not auto-restart.
+- The monitor renders server values as text, not HTML. Unused SMS receive, privileged no-confirmation, boot, and wake-lock permissions were removed.
 
-## Android permission and lifecycle notes
+## Remaining risks and limits
 
-- The manifest declares `SEND_SMS`, `RECEIVE_SMS`, `SEND_SMS_NO_CONFIRMATION`, foreground service, data-sync foreground service, boot-completed, wake-lock, and notification permissions. The code shown requests only `SEND_SMS` and notifications at runtime. `RECEIVE_SMS` has no receiver in the supplied source; `SEND_SMS_NO_CONFIRMATION` is a privileged permission and should not be relied on by ordinary apps.
-- The app starts its long-running service on launch and acquires a partial wake lock. Review battery impact and Android foreground-service policy before release.
-- `ANDROID_ID` is sent to the configured backend as a device identifier. Treat it as linkable device data; avoid logging or publishing it and provide a privacy notice.
-- The manifest allows backup and cleartext traffic. Review backup exclusions and network security configuration before distributing an APK.
+1. **SMS permission and distribution policy.** While enabled, the service sends every queued message addressed to the paired device. The phone user must control the server and recipients, and the app must clearly disclose this behavior. Google Play currently restricts the SMS permission group, including `SEND_SMS`, to apps registered as the default SMS or Assistant handler, subject to the current policy. This app is not a default SMS app, so Play distribution may be blocked unless the design and eligibility change. Review the [current SMS permissions policy](https://support.google.com/googleplay/android-developer/answer/10208820) before distribution.
+2. **Delivery is not exactly once.** Android's `SmsManager` call does not include delivery callbacks. If the SMS is submitted but the phone loses connectivity before the server records the status, the server may retry it after the 60-second queue lease. Do not use this prototype for payments, OTP delivery, or other messages where duplicates have material consequences.
+3. **Token storage.** The device token is kept in the app's private preferences. Backup is disabled, but a rooted or compromised phone can expose it. Revoke and replace tokens after loss or compromise.
+4. **Data retention.** SQLite contains recipient numbers and message bodies, potentially including OTPs. Restrict access, encrypt backups, define retention/deletion, and periodically purge sent/failed records.
+5. **Transport/deployment.** HTTPS must terminate at a trusted certificate. Set the database path outside the web root and configure equivalent access-denial rules if using Nginx; the included `.htaccess` covers Apache only.
+6. **Foreground-service policy.** The app currently targets API 34. Android 15/API 35 adds a six-hour-per-24-hour limit for `dataSync` foreground services and requires timely stop behavior. Review [Android foreground-service timeouts](https://developer.android.com/develop/background-work/services/fgs/timeout) before raising the target SDK.
 
 ## Repository hygiene
 
-The supplied ZIP's embedded archive contained device records, phone numbers, OTP-like message samples, and a JSON backup. These runtime records were not copied into the repository. `.gitignore` excludes live `devices.json`, `sms.json`, and backup files. Do not commit credentials, real phone numbers, OTPs, message bodies, APK signing keys, or server logs.
-
-## Before production
-
-At minimum, add server authentication and per-device tokens, protect queue operations, use safe storage and locking, fix the XSS sink, restore TLS validation, require HTTPS, remove unused/privileged permissions, define consent and retention behavior, and test the supported Android versions and server deployment model.
+The original ZIP included device records, phone numbers, OTP-like messages, and a backup archive. They were excluded. The hard-coded test recipient was removed. Do not commit live database files, device tokens, password hashes, message data, signing keys, or server logs.
